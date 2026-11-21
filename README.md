@@ -1,115 +1,402 @@
-# BitSet - Практика в Qt
+Ниже — решение задачи 1 варианта 7: процедурная реализация битового множества на C.
 
-Реализация практики "Битовое множество" (Вариант 7) с графическим интерфейсом на Qt 4.11
+Выбор слова: uint64_t.
+Почему: одно слово обрабатывает 64 элемента за одну операцию; 64 — степень двойки, поэтому номер слова и номер бита считаются как value >> 6 и value & 63; тип беззнаковый, чтобы сдвиги и маски не зависели от знаковости. Хвост последнего слова закрывается маской last_mask, чтобы биты за границей диапазона оставались нулевыми.
 
-## Структура проекта
+bitset.h
 
+```c
+#ifndef BITSET_H
+#define BITSET_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef enum {
+    BITSET_OK = 0,
+    BITSET_ERR_INVALID_ARGUMENT,
+    BITSET_ERR_OUT_OF_RANGE,
+    BITSET_ERR_RANGE_MISMATCH,
+    BITSET_ERR_NO_MEMORY,
+    BITSET_ERR_NOT_FOUND
+} BitSetError;
+
+typedef struct {
+    uint64_t *words;
+    size_t range_size;
+    size_t word_count;
+    uint64_t last_mask;
+} BitSet;
+
+BitSetError bitset_create(size_t range_size, BitSet *out_set);
+void bitset_destroy(BitSet *set);
+
+BitSetError bitset_add(BitSet *set, size_t value);
+BitSetError bitset_remove(BitSet *set, size_t value);
+BitSetError bitset_contains(const BitSet *set, size_t value, bool *out_contains);
+
+BitSetError bitset_union(const BitSet *a, const BitSet *b, BitSet *result);
+BitSetError bitset_intersection(const BitSet *a, const BitSet *b, BitSet *result);
+BitSetError bitset_difference(const BitSet *a, const BitSet *b, BitSet *result);
+BitSetError bitset_complement(BitSet *set);
+
+size_t bitset_count(const BitSet *set);
+void bitset_clear(BitSet *set);
+void bitset_fill(BitSet *set);
+
+#endif
 ```
-bitset/
-├── bitset.pro           # qmake файл проекта
-├── bitset.h             # Заголовок класса BitSet
-├── bitset.cpp           # Реализация BitSet
-├── mainwindow.h         # Заголовок главного окна
-├── mainwindow.cpp       # Реализация главного окна
-├── main.cpp             # Точка входа
-└── README.md            # Этот файл
+
+bitset.c
+
+```c
+#include "bitset.h"
+#include <stdlib.h>
+
+static uint64_t make_last_mask(size_t range_size) {
+    size_t rem = range_size % 64;
+    if (range_size == 0) {
+        return 0;
+    }
+    if (rem == 0) {
+        return UINT64_MAX;
+    }
+    return (UINT64_C(1) << rem) - 1;
+}
+
+static bool words_are_valid(const BitSet *set) {
+    return set != NULL && (set->word_count == 0 || set->words != NULL);
+}
+
+static unsigned popcount64(uint64_t x) {
+    unsigned count = 0;
+    while (x != 0) {
+        x &= x - 1;
+        ++count;
+    }
+    return count;
+}
+
+static BitSetError check_value(const BitSet *set, size_t value) {
+    if (!words_are_valid(set)) {
+        return BITSET_ERR_INVALID_ARGUMENT;
+    }
+    if (value >= set->range_size) {
+        return BITSET_ERR_OUT_OF_RANGE;
+    }
+    return BITSET_OK;
+}
+
+static BitSetError check_binary(const BitSet *a, const BitSet *b, BitSet *result) {
+    if (!words_are_valid(a) || !words_are_valid(b) || !words_are_valid(result)) {
+        return BITSET_ERR_INVALID_ARGUMENT;
+    }
+    if (a->range_size != b->range_size || a->range_size != result->range_size) {
+        return BITSET_ERR_RANGE_MISMATCH;
+    }
+    return BITSET_OK;
+}
+
+BitSetError bitset_create(size_t range_size, BitSet *out_set) {
+    if (out_set == NULL) {
+        return BITSET_ERR_INVALID_ARGUMENT;
+    }
+
+    out_set->words = NULL;
+    out_set->range_size = range_size;
+    out_set->word_count = range_size / 64 + (range_size % 64 != 0 ? 1 : 0);
+    out_set->last_mask = make_last_mask(range_size);
+
+    if (out_set->word_count > 0) {
+        out_set->words = (uint64_t *)calloc(out_set->word_count, sizeof(uint64_t));
+        if (out_set->words == NULL) {
+            return BITSET_ERR_NO_MEMORY;
+        }
+    }
+
+    return BITSET_OK;
+}
+
+void bitset_destroy(BitSet *set) {
+    if (set == NULL) {
+        return;
+    }
+    free(set->words);
+    set->words = NULL;
+    set->range_size = 0;
+    set->word_count = 0;
+    set->last_mask = 0;
+}
+
+BitSetError bitset_add(BitSet *set, size_t value) {
+    BitSetError err = check_value(set, value);
+    if (err != BITSET_OK) {
+        return err;
+    }
+
+    size_t word_index = value >> 6;
+    size_t bit_index = value & 63;
+    set->words[word_index] |= (UINT64_C(1) << bit_index);
+    return BITSET_OK;
+}
+
+BitSetError bitset_remove(BitSet *set, size_t value) {
+    BitSetError err = check_value(set, value);
+    if (err != BITSET_OK) {
+        return err;
+    }
+
+    size_t word_index = value >> 6;
+    size_t bit_index = value & 63;
+    uint64_t mask = UINT64_C(1) << bit_index;
+
+    if ((set->words[word_index] & mask) == 0) {
+        return BITSET_ERR_NOT_FOUND;
+    }
+
+    set->words[word_index] &= ~mask;
+    return BITSET_OK;
+}
+
+BitSetError bitset_contains(const BitSet *set, size_t value, bool *out_contains) {
+    if (out_contains == NULL) {
+        return BITSET_ERR_INVALID_ARGUMENT;
+    }
+
+    BitSetError err = check_value(set, value);
+    if (err != BITSET_OK) {
+        return err;
+    }
+
+    size_t word_index = value >> 6;
+    size_t bit_index = value & 63;
+    *out_contains = (set->words[word_index] & (UINT64_C(1) << bit_index)) != 0;
+    return BITSET_OK;
+}
+
+BitSetError bitset_union(const BitSet *a, const BitSet *b, BitSet *result) {
+    BitSetError err = check_binary(a, b, result);
+    if (err != BITSET_OK) {
+        return err;
+    }
+
+    for (size_t i = 0; i < a->word_count; ++i) {
+        result->words[i] = a->words[i] | b->words[i];
+    }
+    if (result->word_count > 0) {
+        result->words[result->word_count - 1] &= result->last_mask;
+    }
+    return BITSET_OK;
+}
+
+BitSetError bitset_intersection(const BitSet *a, const BitSet *b, BitSet *result) {
+    BitSetError err = check_binary(a, b, result);
+    if (err != BITSET_OK) {
+        return err;
+    }
+
+    for (size_t i = 0; i < a->word_count; ++i) {
+        result->words[i] = a->words[i] & b->words[i];
+    }
+    if (result->word_count > 0) {
+        result->words[result->word_count - 1] &= result->last_mask;
+    }
+    return BITSET_OK;
+}
+
+BitSetError bitset_difference(const BitSet *a, const BitSet *b, BitSet *result) {
+    BitSetError err = check_binary(a, b, result);
+    if (err != BITSET_OK) {
+        return err;
+    }
+
+    for (size_t i = 0; i < a->word_count; ++i) {
+        result->words[i] = a->words[i] & ~b->words[i];
+    }
+    if (result->word_count > 0) {
+        result->words[result->word_count - 1] &= result->last_mask;
+    }
+    return BITSET_OK;
+}
+
+BitSetError bitset_complement(BitSet *set) {
+    if (!words_are_valid(set)) {
+        return BITSET_ERR_INVALID_ARGUMENT;
+    }
+
+    for (size_t i = 0; i < set->word_count; ++i) {
+        set->words[i] = ~set->words[i];
+    }
+    if (set->word_count > 0) {
+        set->words[set->word_count - 1] &= set->last_mask;
+    }
+    return BITSET_OK;
+}
+
+size_t bitset_count(const BitSet *set) {
+    if (!words_are_valid(set) || set->word_count == 0) {
+        return 0;
+    }
+
+    size_t total = 0;
+    for (size_t i = 0; i < set->word_count; ++i) {
+        uint64_t word = set->words[i];
+        if (i + 1 == set->word_count) {
+            word &= set->last_mask;
+        }
+        total += popcount64(word);
+    }
+    return total;
+}
+
+void bitset_clear(BitSet *set) {
+    if (!words_are_valid(set)) {
+        return;
+    }
+    for (size_t i = 0; i < set->word_count; ++i) {
+        set->words[i] = 0;
+    }
+}
+
+void bitset_fill(BitSet *set) {
+    if (!words_are_valid(set)) {
+        return;
+    }
+    for (size_t i = 0; i < set->word_count; ++i) {
+        set->words[i] = UINT64_MAX;
+    }
+    if (set->word_count > 0) {
+        set->words[set->word_count - 1] &= set->last_mask;
+    }
+}
 ```
 
-## Требования
+demo.c
 
-- Qt 4.11 или выше
-- g++ (C++11 или выше)
-- qmake
+```c
+#include "bitset.h"
+#include <stdio.h>
 
-На Ubuntu/Debian:
+static const char *err_str(BitSetError err) {
+    switch (err) {
+        case BITSET_OK: return "OK";
+        case BITSET_ERR_INVALID_ARGUMENT: return "INVALID_ARGUMENT";
+        case BITSET_ERR_OUT_OF_RANGE: return "OUT_OF_RANGE";
+        case BITSET_ERR_RANGE_MISMATCH: return "RANGE_MISMATCH";
+        case BITSET_ERR_NO_MEMORY: return "NO_MEMORY";
+        case BITSET_ERR_NOT_FOUND: return "NOT_FOUND";
+        default: return "UNKNOWN";
+    }
+}
+
+static void print_contains(const BitSet *set, size_t value) {
+    bool result = false;
+    BitSetError err = bitset_contains(set, value, &result);
+    if (err == BITSET_OK) {
+        printf("contains(%zu) = %s\n", value, result ? "true" : "false");
+    } else {
+        printf("contains(%zu) -> %s\n", value, err_str(err));
+    }
+}
+
+#define CREATE_OR_RETURN(var, size)                                      \
+    do {                                                                 \
+        BitSetError e_ = bitset_create((size), &(var));                  \
+        if (e_ != BITSET_OK) {                                           \
+            fprintf(stderr, "create failed: %s\n", err_str(e_));         \
+            return 1;                                                    \
+        }                                                                \
+    } while (0)
+
+int main(void) {
+    const size_t N = 130;
+
+    BitSet a, b, empty, single, uni, inter, diff, comp, other;
+
+    CREATE_OR_RETURN(a, N);
+    CREATE_OR_RETURN(b, N);
+    CREATE_OR_RETURN(empty, N);
+    CREATE_OR_RETURN(single, N);
+    CREATE_OR_RETURN(uni, N);
+    CREATE_OR_RETURN(inter, N);
+    CREATE_OR_RETURN(diff, N);
+    CREATE_OR_RETURN(comp, N);
+    CREATE_OR_RETURN(other, 128);
+
+    printf("Range size = %zu (not multiple of 64)\n", N);
+    printf("A after create: count = %zu\n", bitset_count(&a));
+
+    printf("add(%zu) on A -> %s\n", N, err_str(bitset_add(&a, N)));
+
+    bitset_add(&a, 0);
+    bitset_add(&a, 63);
+    bitset_add(&a, 64);
+    bitset_add(&a, N - 1);
+
+    printf("A = {0, 63, 64, 129}: count = %zu\n", bitset_count(&a));
+    print_contains(&a, 0);
+    print_contains(&a, N - 1);
+    print_contains(&a, N);
+
+    printf("remove(0) first    -> %s\n", err_str(bitset_remove(&a, 0)));
+    printf("remove(0) repeated -> %s\n", err_str(bitset_remove(&a, 0)));
+    printf("A after repeated remove: count = %zu\n", bitset_count(&a));
+
+    bitset_add(&single, 42);
+    printf("single = {42}: count = %zu\n", bitset_count(&single));
+    bitset_remove(&single, 42);
+    printf("single after remove: count = %zu\n", bitset_count(&single));
+
+    bitset_add(&b, 1);
+    bitset_add(&b, 64);
+    bitset_add(&b, 65);
+    bitset_add(&b, N - 1);
+    printf("B = {1, 64, 65, 129}: count = %zu\n", bitset_count(&b));
+
+    bitset_union(&a, &b, &uni);
+    printf("A | B: count = %zu\n", bitset_count(&uni));
+
+    bitset_intersection(&a, &b, &inter);
+    printf("A & B: count = %zu\n", bitset_count(&inter));
+
+    bitset_difference(&a, &b, &diff);
+    printf("A \\ B: count = %zu\n", bitset_count(&diff));
+
+    bitset_union(&empty, &a, &comp);
+    size_t before = bitset_count(&comp);
+    bitset_complement(&comp);
+    size_t after = bitset_count(&comp);
+    printf("complement(A): before = %zu, after = %zu, expected = %zu\n",
+           before, after, N - before);
+
+    bitset_fill(&comp);
+    printf("fill(comp): count = %zu\n", bitset_count(&comp));
+    bitset_clear(&comp);
+    printf("clear(comp): count = %zu\n", bitset_count(&comp));
+
+    printf("union A with other range 128 -> %s\n",
+           err_str(bitset_union(&a, &other, &uni)));
+
+    bitset_destroy(&a);
+    bitset_destroy(&b);
+    bitset_destroy(&empty);
+    bitset_destroy(&single);
+    bitset_destroy(&uni);
+    bitset_destroy(&inter);
+    bitset_destroy(&diff);
+    bitset_destroy(&comp);
+    bitset_destroy(&other);
+
+    return 0;
+}
+```
+
+Сборка:
+
 ```bash
-sudo apt-get install qt4-qmake libqt4-dev
+gcc -std=c11 -Wall -Wextra -pedantic bitset.c demo.c -o demo
+./demo
 ```
 
-На Fedora/RHEL:
-```bash
-sudo yum install qt-devel
-```
-
-На macOS:
-```bash
-brew install qt4
-```
-
-## Компиляция и запуск
-
-### На Linux:
-
-```bash
-# Создать файлы конфигурации
-qmake bitset.pro
-
-# Скомпилировать
-make
-
-# Запустить
-./bitset
-```
-
-Или сразу:
-```bash
-qmake && make && ./bitset
-```
-
-### На macOS:
-
-```bash
-qmake-qt4 bitset.pro
-make
-./bitset.app/Contents/MacOS/bitset
-```
-
-## Функциональность приложения
-
-### Основные операции:
-- **Добавить** - добавить элемент в множество
-- **Удалить** - удалить элемент из множества
-- **Содержит?** - проверить наличие элемента
-- **Очистить** - очистить множество
-
-### Операции над множествами:
-- **A ∪ B** - объединение множеств
-- **A ∩ B** - пересечение множеств
-- **A \ B** - разность множеств
-- **Пусто?** - проверка пустоты множеств
-
-## Особенности
-
-- Работает с элементами от 0 до 99
-- Использует std::bitset для эффективного представления
-- Интуитивный графический интерфейс
-- Лог всех операций
-- Отображение размера множеств в реальном времени
-
-## Технические детали
-
-- Язык: C++11
-- Фреймворк: Qt 4.11
-- Битовые операции: OR, AND, NOT
-- Максимум элементов: 100 (0-99)
-
-## Для защиты
-
-При защите обратите внимание на:
-
-1. **Класс BitSet** - использует std::bitset для эффективного хранения
-2. **Битовые операции** - правильная реализация объединения, пересечения и разности
-3. **GUI** - удобный интерфейс с логом операций
-4. **Корректность** - все операции работают правильно
-
-## Вопросы для защиты
-
-1. Что такое битовое множество и как оно хранит данные?
-2. Какие битовые операции используются для объединения, пересечения и разности?
-3. Почему BitSet эффективнее чем обычный массив?
-4. Как реализована каждая операция в классе?
-5. Какие ограничения есть в текущей реализации?
-
-## Лицензия
-
-Учебный проект для практики.
+Важное соглашение: bitset_remove возвращает BITSET_ERR_NOT_FOUND при повторном удалении. Это позволяет явно показать ошибочный/краевой случай в демонстрационной программе. Если нужна идемпотентная семантика, можно возвращать BITSET_OK и в этой ветке.
